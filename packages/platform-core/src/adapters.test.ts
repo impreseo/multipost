@@ -100,7 +100,7 @@ describe("InstagramPlatformAdapter", () => {
     });
 
     expect(res.ok).toBe(false);
-    expect(res.errorCode).toBe("MEDIA_ERROR");
+    expect(res.errorCode).toBe("MEDIA_HOSTING_REQUIRED");
     expect(res.error).toContain("publicly accessible HTTPS media URLs");
   });
 });

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { Platform, PlatformAccountRecord } from "@welz/shared";
 import type {
   ConnectionStatus,
@@ -9,7 +10,11 @@ import type {
   PublishResult,
   ValidationResult,
 } from "./types.js";
+import { resolvePublicMediaUrl, type MediaHostConfig } from "./media-host.js";
 
+// ===========================================================================
+// Unavailable Platform Adapter
+// ===========================================================================
 export class UnavailablePlatformAdapter implements PlatformAdapter {
   readonly platform: Platform;
 
@@ -36,7 +41,7 @@ export class UnavailablePlatformAdapter implements PlatformAdapter {
     return {
       ok: false,
       message:
-        "Official API credentials are required. Configure platform app credentials in the main process before connecting.",
+        "Official API credentials are required. Configure platform app credentials before connecting.",
     };
   }
 
@@ -61,17 +66,19 @@ export class UnavailablePlatformAdapter implements PlatformAdapter {
     return [{ ok: false, errorCode: "API_ERROR", error: "Platform API not configured." }];
   }
 
-  async publishPost(_account: PlatformAccountRecord, _input: PublishInput): Promise<PublishResult> {
+  async publishPost(): Promise<PublishResult> {
     return {
       ok: false,
       mode: "unavailable",
       errorCode: "API_ERROR",
-      error:
-        "Publishing unavailable. Connect an account with supported API permissions, or enable Development mode for simulated testing.",
+      error: "Publishing unavailable. Connect an account with supported official API permissions.",
     };
   }
 }
 
+// ===========================================================================
+// Simulated Platform Adapter (Isolated for Unit Tests / Sandboxes)
+// ===========================================================================
 export class SimulatedPlatformAdapter implements PlatformAdapter {
   readonly platform: Platform;
 
@@ -161,28 +168,36 @@ export class SimulatedPlatformAdapter implements PlatformAdapter {
   ): Promise<MediaUploadResult[]> {
     return items.map((_, i) => ({
       ok: true,
-      platformMediaId: `sim-media-${this.platform}-${i}`,
+      platformMediaId: `sim-asset-${Date.now()}-${i}`,
     }));
   }
 
-  async publishPost(_account: PlatformAccountRecord, input: PublishInput): Promise<PublishResult> {
+  async publishPost(
+    account: PlatformAccountRecord,
+    input: PublishInput
+  ): Promise<PublishResult> {
+    const ts = Date.now();
+    const idem = input.idempotencyKey ? `${input.idempotencyKey.slice(0, 8)}-` : "";
     return {
       ok: true,
       mode: "simulated",
-      externalPostId: `sim-${this.platform}-${input.idempotencyKey.slice(0, 8)}`,
-      responseMeta: { simulated: true, platform: this.platform, timestamp: new Date().toISOString() },
+      externalPostId: `sim-${account.platform}-${idem}${ts}`,
+      responseMeta: {
+        simulated: true,
+        dispatchedAt: new Date().toISOString(),
+        idempotencyKey: input.idempotencyKey,
+      },
     };
   }
 }
 
+// ===========================================================================
+// LINKEDIN PLATFORM ADAPTER (Real Official LinkedIn Posts & Media API)
+// ===========================================================================
 export class LinkedInPlatformAdapter implements PlatformAdapter {
   readonly platform: Platform = "linkedin";
 
   constructor(private readonly getSecret?: CredentialResolver) {}
-
-  private getAccountType(account: PlatformAccountRecord): "member" | "organization" {
-    return account.accountName.toLowerCase().includes("personal") ? "member" : "organization";
-  }
 
   private resolveToken(account: PlatformAccountRecord): string | null {
     if (account.authReference && this.getSecret) {
@@ -192,11 +207,26 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
     return process.env.LINKEDIN_ACCESS_TOKEN || null;
   }
 
+  private getAuthorUrn(account: PlatformAccountRecord): string {
+    const isOrg =
+      account.accountName.toLowerCase().includes("page") ||
+      account.accountName.toLowerCase().includes("organization") ||
+      account.accountName.toLowerCase().includes("company") ||
+      account.accountName === "WELZ";
+
+    if (account.accountId) {
+      return isOrg
+        ? `urn:li:organization:${account.accountId}`
+        : `urn:li:person:${account.accountId}`;
+    }
+    return "urn:li:person:me";
+  }
+
   async getConnectionStatus(account: PlatformAccountRecord): Promise<ConnectionStatus> {
     const token = this.resolveToken(account);
     const connected = account.status === "connected" && !!token;
-    const accountType = this.getAccountType(account);
-    const requiredScope = accountType === "organization" ? "w_organization_social" : "w_member_social";
+    const authorUrn = this.getAuthorUrn(account);
+    const accountType = authorUrn.startsWith("urn:li:organization") ? "organization" : "member";
 
     return {
       connected,
@@ -207,14 +237,14 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
       requiresConfig: !connected,
       configRequirements: [
         "LinkedIn Developer App Client ID & Secret",
-        `OAuth 2.0 Scope: ${requiredScope}`,
+        `OAuth 2.0 Scope: ${accountType === "organization" ? "w_organization_social" : "w_member_social"}`,
         accountType === "organization"
           ? "Organization Administrator Access (URN: urn:li:organization)"
           : "Member Identity (URN: urn:li:person)",
       ],
       message: connected
-        ? `Connected via LinkedIn Posts API as ${accountType === "organization" ? "Organization Page" : "Personal Member"}.`
-        : `LinkedIn publishing requires OAuth 2.0 credentials with ${requiredScope} scope.`,
+        ? `Connected via LinkedIn Posts API as ${accountType === "organization" ? "Organization Page" : "Personal Profile"}.`
+        : "LinkedIn publishing requires official OAuth 2.0 authorization with w_member_social or w_organization_social scope.",
       lastVerifiedAt: account.lastVerifiedAt,
     };
   }
@@ -222,8 +252,7 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
   async connect(accountId: string): Promise<{ ok: boolean; message: string }> {
     return {
       ok: false,
-      message:
-        `LinkedIn OAuth connection boundary: Configure LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in platform settings or securely store OAuth access token for ${accountId}.`,
+      message: `LinkedIn OAuth connection required for ${accountId}. Initiate official OAuth authorization flow.`,
     };
   }
 
@@ -234,10 +263,9 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
   async testConnection(account: PlatformAccountRecord): Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }> {
     const token = this.resolveToken(account);
     if (!token) {
-      const type = this.getAccountType(account);
       return {
         ok: false,
-        message: `LinkedIn test failed [AUTH_ERROR]: No credentials found for ${account.accountName}. Please initiate OAuth 2.0 authorization (${type === "organization" ? "w_organization_social" : "w_member_social"}).`,
+        message: `LinkedIn test failed [AUTH_ERROR]: No OAuth access token found for ${account.accountName}. Please connect your LinkedIn account.`,
       };
     }
 
@@ -249,13 +277,13 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
       if (res.status === 401) {
         return {
           ok: false,
-          message: "LinkedIn test failed [AUTH_ERROR]: Access token expired or invalid. Please re-authenticate.",
+          message: "LinkedIn test failed [AUTH_ERROR]: Access token expired or revoked. Please reconnect your account.",
         };
       }
       if (res.status === 403) {
         return {
           ok: false,
-          message: "LinkedIn test failed [PERMISSION_ERROR]: Account lacks required permissions.",
+          message: "LinkedIn test failed [PERMISSION_ERROR]: Connected account lacks required member publishing permissions.",
         };
       }
       if (!res.ok) {
@@ -268,10 +296,10 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
       const data = (await res.json()) as Record<string, unknown>;
       return {
         ok: true,
-        message: `LinkedIn connection healthy: Verified identity for ${data.name || account.accountName}.`,
+        message: `LinkedIn connection healthy: Verified identity for ${String(data.name || account.accountName)}.`,
         details: { sub: data.sub, name: data.name },
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         message: `LinkedIn test failed [NETWORK_ERROR]: ${err instanceof Error ? err.message : "Network request failed"}`,
@@ -305,15 +333,173 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
       return items.map(() => ({
         ok: false,
         errorCode: "AUTH_ERROR",
-        error: "LinkedIn media upload requires active OAuth access token with rest/images or rest/videos asset upload permissions.",
+        error: "LinkedIn media upload requires an active OAuth access token.",
       }));
     }
 
-    return items.map(() => ({
-      ok: false,
-      errorCode: "MEDIA_ERROR",
-      error: "LinkedIn binary media upload requires two-step rest/images registration. Ensure image size <= 8MB or video <= 200MB.",
-    }));
+    const authorUrn = this.getAuthorUrn(account);
+    const results: MediaUploadResult[] = [];
+
+    for (const item of items) {
+      try {
+        if (!fs.existsSync(item.localPath)) {
+          results.push({
+            ok: false,
+            errorCode: "MEDIA_ERROR",
+            error: `Local media file not found: ${item.localPath}`,
+          });
+          continue;
+        }
+
+        const buffer = fs.readFileSync(item.localPath);
+        const isVideo = item.mimeType.startsWith("video");
+
+        if (isVideo) {
+          // 1. Initialize Video Upload
+          const initRes = await fetch("https://api.linkedin.com/rest/videos?action=initializeUpload", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "LinkedIn-Version": "202401",
+              "X-Restli-Protocol-Version": "2.0.0",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              initializeUploadRequest: {
+                owner: authorUrn,
+                fileSizeBytes: buffer.length,
+                uploadCaptions: false,
+                uploadThumbnail: false,
+              },
+            }),
+          });
+
+          if (!initRes.ok) {
+            const errText = await initRes.text();
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: `LinkedIn video registration failed (HTTP ${initRes.status}): ${errText.slice(0, 160)}`,
+            });
+            continue;
+          }
+
+          const initData = (await initRes.json()) as {
+            value?: {
+              uploadInstructions?: Array<{ uploadUrl: string }>;
+              video?: string;
+            };
+          };
+
+          const uploadUrl = initData.value?.uploadInstructions?.[0]?.uploadUrl;
+          const videoUrn = initData.value?.video;
+
+          if (!uploadUrl || !videoUrn) {
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: "LinkedIn video response did not provide upload URL.",
+            });
+            continue;
+          }
+
+          // 2. Binary PUT of video bytes
+          const putRes = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": item.mimeType,
+            },
+            body: buffer,
+          });
+
+          if (!putRes.ok) {
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: `LinkedIn video binary upload failed (HTTP ${putRes.status}).`,
+            });
+            continue;
+          }
+
+          results.push({ ok: true, platformMediaId: videoUrn });
+        } else {
+          // 1. Initialize Image Upload
+          const initRes = await fetch("https://api.linkedin.com/rest/images?action=initializeUpload", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "LinkedIn-Version": "202401",
+              "X-Restli-Protocol-Version": "2.0.0",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              initializeUploadRequest: {
+                owner: authorUrn,
+              },
+            }),
+          });
+
+          if (!initRes.ok) {
+            const errText = await initRes.text();
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: `LinkedIn image registration failed (HTTP ${initRes.status}): ${errText.slice(0, 160)}`,
+            });
+            continue;
+          }
+
+          const initData = (await initRes.json()) as {
+            value?: {
+              uploadUrl?: string;
+              image?: string;
+            };
+          };
+
+          const uploadUrl = initData.value?.uploadUrl;
+          const imageUrn = initData.value?.image;
+
+          if (!uploadUrl || !imageUrn) {
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: "LinkedIn image response did not provide upload instructions.",
+            });
+            continue;
+          }
+
+          // 2. Binary PUT of image bytes
+          const putRes = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": item.mimeType,
+            },
+            body: buffer,
+          });
+
+          if (!putRes.ok) {
+            results.push({
+              ok: false,
+              errorCode: "MEDIA_ERROR",
+              error: `LinkedIn image binary upload failed (HTTP ${putRes.status}).`,
+            });
+            continue;
+          }
+
+          results.push({ ok: true, platformMediaId: imageUrn });
+        }
+      } catch (err: unknown) {
+        results.push({
+          ok: false,
+          errorCode: "MEDIA_ERROR",
+          error: `Media upload exception: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    return results;
   }
 
   async publishPost(account: PlatformAccountRecord, input: PublishInput): Promise<PublishResult> {
@@ -323,20 +509,58 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
         ok: false,
         mode: "real",
         errorCode: "AUTH_ERROR",
-        error: "LinkedIn authentication required. Reconnect your LinkedIn account with valid OAuth credentials.",
+        error: "LinkedIn authentication required. Reconnect your account with valid OAuth credentials.",
       };
     }
 
-    const accountType = this.getAccountType(account);
+    const authorUrn = this.getAuthorUrn(account);
+    const isOrg = authorUrn.startsWith("urn:li:organization");
 
     try {
-      const authorUrn = account.accountId
-        ? accountType === "organization"
-          ? `urn:li:organization:${account.accountId}`
-          : `urn:li:person:${account.accountId}`
-        : "urn:li:person:me";
+      let contentBlock: Record<string, unknown> | undefined;
 
-      const payload = {
+      // Handle media attachments if present
+      if (input.mediaPaths.length > 0) {
+        const uploadInputs = input.mediaPaths.map((p) => {
+          const ext = p.split(".").pop()?.toLowerCase();
+          const mime = ext === "mp4" || ext === "mov" ? "video/mp4" : "image/jpeg";
+          return { localPath: p, mimeType: mime };
+        });
+
+        const uploads = await this.uploadMedia(account, uploadInputs);
+        const failedUpload = uploads.find((u) => !u.ok);
+        if (failedUpload) {
+          return {
+            ok: false,
+            mode: "real",
+            errorCode: failedUpload.errorCode || "MEDIA_ERROR",
+            error: failedUpload.error || "LinkedIn media upload failed.",
+          };
+        }
+
+        const mediaIds = uploads.map((u) => u.platformMediaId!).filter(Boolean);
+
+        if (mediaIds.length === 1) {
+          const isVideo = mediaIds[0].startsWith("urn:li:video");
+          contentBlock = {
+            media: {
+              id: mediaIds[0],
+              title: isVideo ? "Video Post" : "Post Image",
+            },
+          };
+        } else if (mediaIds.length > 1) {
+          contentBlock = {
+            multiImage: {
+              images: mediaIds.map((id, idx) => ({
+                id,
+                altText: `Attachment ${idx + 1}`,
+              })),
+            },
+          };
+        }
+      }
+
+      const payload: Record<string, unknown> = {
         author: authorUrn,
         commentary: input.text,
         visibility: "PUBLIC",
@@ -348,6 +572,10 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
         lifecycleState: "PUBLISHED",
         isReshareDisabledByAuthor: false,
       };
+
+      if (contentBlock) {
+        payload.content = contentBlock;
+      }
 
       const res = await fetch("https://api.linkedin.com/rest/posts", {
         method: "POST",
@@ -361,12 +589,12 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
       });
 
       if (res.status === 201) {
-        const remoteId = res.headers.get("x-restli-id") || `li-${Date.now()}`;
+        const remoteId = res.headers.get("x-restli-id") || `urn:li:share:${Date.now()}`;
         return {
           ok: true,
           mode: "real",
           externalPostId: remoteId,
-          responseMeta: { status: 201, restliId: remoteId },
+          responseMeta: { status: 201, restliId: remoteId, author: authorUrn },
         };
       }
 
@@ -384,10 +612,19 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
           ok: false,
           mode: "real",
           errorCode: "PERMISSION_ERROR",
-          error:
-            accountType === "organization"
-              ? "Organization publishing unavailable. The connected account does not have the required organization permission (w_organization_social)."
-              : "Member publishing unavailable. The connected account lacks w_member_social permission.",
+          error: isOrg
+            ? "LinkedIn Organization publishing failed. The authenticated member requires an Administrator role on the LinkedIn Page (urn:li:organization)."
+            : "LinkedIn Member publishing failed. Account lacks w_member_social permission.",
+        };
+      }
+
+      if (res.status === 422) {
+        const errText = await res.text();
+        return {
+          ok: false,
+          mode: "real",
+          errorCode: "VALIDATION_ERROR",
+          error: `LinkedIn post validation error: ${errText.slice(0, 200)}`,
         };
       }
 
@@ -407,7 +644,7 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
         errorCode: "API_ERROR",
         error: `LinkedIn API error (HTTP ${res.status}): ${errText.slice(0, 200)}`,
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         mode: "real",
@@ -418,10 +655,16 @@ export class LinkedInPlatformAdapter implements PlatformAdapter {
   }
 }
 
+// ===========================================================================
+// INSTAGRAM PLATFORM ADAPTER (Real Meta Content Publishing API)
+// ===========================================================================
 export class InstagramPlatformAdapter implements PlatformAdapter {
   readonly platform: Platform = "instagram";
 
-  constructor(private readonly getSecret?: CredentialResolver) {}
+  constructor(
+    private readonly getSecret?: CredentialResolver,
+    private readonly mediaHostConfig?: MediaHostConfig
+  ) {}
 
   private resolveToken(account: PlatformAccountRecord): string | null {
     if (account.authReference && this.getSecret) {
@@ -449,7 +692,7 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
       ],
       message: connected
         ? "Connected via Meta Graph API (Instagram Content Publishing API)."
-        : "Instagram publishing requires a Meta Business Account (Creator or Business) linked to a Facebook Page, plus public HTTPS media storage.",
+        : "Instagram publishing requires official Meta OAuth authorization and public HTTPS media hosting.",
       lastVerifiedAt: account.lastVerifiedAt,
     };
   }
@@ -457,8 +700,7 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
   async connect(accountId: string): Promise<{ ok: boolean; message: string }> {
     return {
       ok: false,
-      message:
-        `Meta API integration boundary: Instagram publishing for ${accountId} requires Facebook Login with instagram_content_publish permission and public media storage configuration.`,
+      message: `Meta / Instagram authorization required for ${accountId}. Initiate official OAuth flow.`,
     };
   }
 
@@ -471,17 +713,18 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
     if (!token) {
       return {
         ok: false,
-        message: "Instagram test failed [AUTH_ERROR]: No Meta Page Access Token found. Connect a Meta Business Account with instagram_content_publish permission.",
+        message: "Instagram test failed [AUTH_ERROR]: No Meta access token found. Please connect your Instagram Professional Account.",
       };
     }
 
     try {
       const igId = account.accountId || "me";
-      const res = await fetch(`https://graph.facebook.com/v20.0/${igId}?fields=id,username&access_token=${token}`);
+      const res = await fetch(`https://graph.facebook.com/v21.0/${igId}?fields=id,username,name&access_token=${token}`);
+
       if (res.status === 401 || res.status === 190) {
         return {
           ok: false,
-          message: "Instagram test failed [AUTH_ERROR]: Meta OAuth access token is invalid or expired.",
+          message: "Instagram test failed [AUTH_ERROR]: Meta OAuth access token is invalid or expired. Reconnect your account.",
         };
       }
       if (!res.ok) {
@@ -490,13 +733,14 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
           message: `Instagram test failed [API_ERROR]: HTTP ${res.status} ${res.statusText}`,
         };
       }
+
       const data = (await res.json()) as Record<string, unknown>;
       return {
         ok: true,
         message: `Instagram connection verified: Meta Graph API professional account is active (${String(data.username || account.accountName)}).`,
         details: data,
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         message: `Instagram test failed [NETWORK_ERROR]: ${err instanceof Error ? err.message : "Network request failed"}`,
@@ -529,23 +773,43 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
   }
 
   async uploadMedia(
-    account: PlatformAccountRecord,
+    _account: PlatformAccountRecord,
     items: MediaUploadInput[]
   ): Promise<MediaUploadResult[]> {
-    const token = this.resolveToken(account);
-    if (!token) {
-      return items.map(() => ({
-        ok: false,
-        errorCode: "AUTH_ERROR",
-        error: "Instagram media container creation requires valid Meta Page Access Token.",
-      }));
+    const results: MediaUploadResult[] = [];
+    for (const item of items) {
+      const resolved = await resolvePublicMediaUrl(item.localPath, this.mediaHostConfig);
+      if (!resolved.ok) {
+        results.push({
+          ok: false,
+          errorCode: "MEDIA_HOSTING_REQUIRED",
+          error: resolved.error,
+        });
+      } else {
+        results.push({
+          ok: true,
+          platformMediaId: resolved.url,
+        });
+      }
     }
+    return results;
+  }
 
-    return items.map(() => ({
-      ok: false,
-      errorCode: "MEDIA_ERROR",
-      error: "Instagram Content Publishing API requires publicly accessible HTTPS media URLs for container ingestion.",
-    }));
+  private async pollContainerStatus(containerId: string, token: string, maxAttempts = 12): Promise<boolean> {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`https://graph.facebook.com/v21.0/${containerId}?fields=status_code&access_token=${token}`);
+        if (res.ok) {
+          const json = (await res.json()) as { status_code?: string };
+          if (json.status_code === "FINISHED") return true;
+          if (json.status_code === "ERROR") return false;
+        }
+      } catch {
+        // continue polling
+      }
+    }
+    return true; // proceed to publish attempt
   }
 
   async publishPost(account: PlatformAccountRecord, input: PublishInput): Promise<PublishResult> {
@@ -555,7 +819,7 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
         ok: false,
         mode: "real",
         errorCode: "AUTH_ERROR",
-        error: "Instagram authentication required. Connect a Meta Business Account with instagram_content_publish permissions.",
+        error: "Instagram authentication required. Connect an Instagram Professional Account with instagram_content_publish permission.",
       };
     }
 
@@ -568,58 +832,128 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
       };
     }
 
-    // Check if media paths are public HTTPS URLs vs local file paths
-    const hasLocalFiles = input.mediaPaths.some((p) => !p.startsWith("http://") && !p.startsWith("https://"));
-    if (hasLocalFiles) {
+    const igUserId = account.accountId;
+    if (!igUserId) {
       return {
         ok: false,
         mode: "real",
-        errorCode: "MEDIA_ERROR",
-        error: "Meta Content Publishing API requires publicly accessible HTTPS media URLs for container ingestion. Local desktop files cannot be fetched directly by Meta servers without configured public media hosting.",
+        errorCode: "PERMISSION_ERROR",
+        error: "Instagram Professional Account ID not found. Ensure account is linked to Meta Business Manager.",
       };
     }
 
+    // Resolve public HTTPS URLs for all media items
+    const resolvedUrls: string[] = [];
+    for (const p of input.mediaPaths) {
+      const res = await resolvePublicMediaUrl(p, this.mediaHostConfig);
+      if (!res.ok || !res.url) {
+        return {
+          ok: false,
+          mode: "real",
+          errorCode: "MEDIA_HOSTING_REQUIRED",
+          error: res.error || "Public HTTPS media URL required for Instagram container publishing.",
+        };
+      }
+      resolvedUrls.push(res.url);
+    }
+
     try {
-      const igUserId = account.accountId;
-      if (!igUserId) {
-        return {
-          ok: false,
-          mode: "real",
-          errorCode: "PERMISSION_ERROR",
-          error: "Instagram Professional Account ID not found. Ensure account is linked to Meta Business Manager.",
-        };
+      let creationId = "";
+
+      if (resolvedUrls.length === 1) {
+        const isVideo = input.mediaPaths[0].toLowerCase().endsWith(".mp4") || input.mediaPaths[0].toLowerCase().endsWith(".mov");
+
+        // 1. Create Media Container
+        const containerBody = isVideo
+          ? {
+              media_type: "REELS",
+              video_url: resolvedUrls[0],
+              caption: input.text,
+              access_token: token,
+            }
+          : {
+              image_url: resolvedUrls[0],
+              caption: input.text,
+              access_token: token,
+            };
+
+        const containerRes = await fetch(`https://graph.facebook.com/v21.0/${igUserId}/media`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(containerBody),
+        });
+
+        const containerData = (await containerRes.json()) as { id?: string; error?: { message?: string; code?: number } };
+        if (!containerRes.ok || !containerData.id) {
+          return {
+            ok: false,
+            mode: "real",
+            errorCode: "MEDIA_ERROR",
+            error: `Instagram container creation failed: ${containerData.error?.message || "Invalid media asset"}`,
+          };
+        }
+
+        creationId = containerData.id;
+        await this.pollContainerStatus(creationId, token);
+      } else {
+        // Carousel Container Publishing (2 to 10 items)
+        const childContainerIds: string[] = [];
+
+        for (let i = 0; i < resolvedUrls.length; i++) {
+          const url = resolvedUrls[i];
+          const isVid = input.mediaPaths[i].toLowerCase().endsWith(".mp4");
+          const childBody = isVid
+            ? { is_carousel_item: true, media_type: "VIDEO", video_url: url, access_token: token }
+            : { is_carousel_item: true, image_url: url, access_token: token };
+
+          const childRes = await fetch(`https://graph.facebook.com/v21.0/${igUserId}/media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(childBody),
+          });
+
+          const childData = (await childRes.json()) as { id?: string; error?: { message?: string } };
+          if (!childRes.ok || !childData.id) {
+            return {
+              ok: false,
+              mode: "real",
+              errorCode: "MEDIA_ERROR",
+              error: `Instagram carousel child item ${i + 1} creation failed: ${childData.error?.message || "Invalid item"}`,
+            };
+          }
+
+          childContainerIds.push(childData.id);
+          await this.pollContainerStatus(childData.id, token, 8);
+        }
+
+        // Create Parent Carousel Container
+        const carouselRes = await fetch(`https://graph.facebook.com/v21.0/${igUserId}/media`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            media_type: "CAROUSEL",
+            caption: input.text,
+            children: childContainerIds,
+            access_token: token,
+          }),
+        });
+
+        const carouselData = (await carouselRes.json()) as { id?: string; error?: { message?: string } };
+        if (!carouselRes.ok || !carouselData.id) {
+          return {
+            ok: false,
+            mode: "real",
+            errorCode: "MEDIA_ERROR",
+            error: `Instagram carousel container error: ${carouselData.error?.message || "Failed to create carousel"}`,
+          };
+        }
+
+        creationId = carouselData.id;
+        await this.pollContainerStatus(creationId, token);
       }
 
-      // Step 1: Create media container
-      const containerRes = await fetch(`https://graph.facebook.com/v20.0/${igUserId}/media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image_url: input.mediaPaths[0],
-          caption: input.text,
-          access_token: token,
-        }),
-      });
-
-      const containerData = (await containerRes.json()) as Record<string, unknown>;
-
-      if (!containerRes.ok || !containerData.id) {
-        const errMsg = typeof containerData.error === "object" && containerData.error !== null
-          ? String((containerData.error as Record<string, unknown>).message || "Container creation failed")
-          : "Failed to create Instagram media container";
-
-        return {
-          ok: false,
-          mode: "real",
-          errorCode: "MEDIA_ERROR",
-          error: `Instagram container creation error: ${errMsg}`,
-        };
-      }
-
-      const creationId = containerData.id as string;
-
-      // Step 2: Publish media container
-      const publishRes = await fetch(`https://graph.facebook.com/v20.0/${igUserId}/media_publish`, {
+      // Step 2: Publish the media container
+      const publishRes = await fetch(`https://graph.facebook.com/v21.0/${igUserId}/media_publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -628,14 +962,13 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
         }),
       });
 
-      const publishData = (await publishRes.json()) as Record<string, unknown>;
-
+      const publishData = (await publishRes.json()) as { id?: string; error?: { message?: string } };
       if (!publishRes.ok || !publishData.id) {
         return {
           ok: false,
           mode: "real",
           errorCode: "API_ERROR",
-          error: "Instagram media publish failed after container creation.",
+          error: `Instagram publish failed: ${publishData.error?.message || "Publish call returned error"}`,
         };
       }
 
@@ -643,9 +976,9 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
         ok: true,
         mode: "real",
         externalPostId: String(publishData.id),
-        responseMeta: { containerId: creationId, postId: publishData.id },
+        responseMeta: { containerId: creationId, igMediaId: publishData.id },
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         mode: "real",
@@ -656,6 +989,9 @@ export class InstagramPlatformAdapter implements PlatformAdapter {
   }
 }
 
+// ===========================================================================
+// WHATSAPP PLATFORM ADAPTER (Real WhatsApp Business Cloud API)
+// ===========================================================================
 export class WhatsAppPlatformAdapter implements PlatformAdapter {
   readonly platform: Platform = "whatsapp";
 
@@ -687,7 +1023,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
       ],
       message: connected
         ? "Connected via WhatsApp Cloud API (Business Messaging Platform)."
-        : "WhatsApp Business Messaging requires WhatsApp Cloud API credentials (Phone Number ID & Permanent System User token).",
+        : "WhatsApp Business Messaging requires Phone Number ID and Permanent System User token.",
       lastVerifiedAt: account.lastVerifiedAt,
     };
   }
@@ -695,8 +1031,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
   async connect(accountId: string): Promise<{ ok: boolean; message: string }> {
     return {
       ok: false,
-      message:
-        `WhatsApp API boundary: Configure WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN for ${accountId} in platform settings.`,
+      message: `WhatsApp Cloud API configuration required for ${accountId}. Configure Phone Number ID and token in Settings.`,
     };
   }
 
@@ -709,7 +1044,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
     if (!token) {
       return {
         ok: false,
-        message: "WhatsApp test failed [AUTH_ERROR]: No Cloud API Phone Number ID or Access Token configured. Connect a Meta WhatsApp Business Platform account.",
+        message: "WhatsApp test failed [AUTH_ERROR]: No Cloud API Access Token found. Configure credentials in Settings.",
       };
     }
 
@@ -722,7 +1057,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
         };
       }
 
-      const res = await fetch(`https://graph.facebook.com/v20.0/${phoneId}?access_token=${token}`);
+      const res = await fetch(`https://graph.facebook.com/v21.0/${phoneId}?access_token=${token}`);
       if (res.status === 401) {
         return {
           ok: false,
@@ -742,7 +1077,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
         message: `WhatsApp Cloud API connection verified: Sender number ${String(data.display_phone_number || phoneId)} is active.`,
         details: data,
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         message: `WhatsApp test failed [NETWORK_ERROR]: ${err instanceof Error ? err.message : "Network request failed"}`,
@@ -772,19 +1107,69 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
     items: MediaUploadInput[]
   ): Promise<MediaUploadResult[]> {
     const token = this.resolveToken(account);
-    if (!token) {
+    const phoneId = account.accountId;
+
+    if (!token || !phoneId) {
       return items.map(() => ({
         ok: false,
         errorCode: "AUTH_ERROR",
-        error: "WhatsApp media upload requires Cloud API System User token.",
+        error: "WhatsApp media upload requires Cloud API Phone Number ID and Access Token.",
       }));
     }
 
-    return items.map(() => ({
-      ok: false,
-      errorCode: "MEDIA_ERROR",
-      error: "WhatsApp Cloud API media upload requires active Phone Number ID and multipart upload session.",
-    }));
+    const results: MediaUploadResult[] = [];
+
+    for (const item of items) {
+      try {
+        if (!fs.existsSync(item.localPath)) {
+          results.push({
+            ok: false,
+            errorCode: "MEDIA_ERROR",
+            error: `File not found: ${item.localPath}`,
+          });
+          continue;
+        }
+
+        const buffer = fs.readFileSync(item.localPath);
+        const filename = item.localPath.split(/[\\/]/).pop() || "media";
+
+        const formData = new FormData();
+        formData.append("messaging_product", "whatsapp");
+        formData.append("type", item.mimeType);
+        formData.append("file", new Blob([buffer], { type: item.mimeType }), filename);
+
+        const res = await fetch(`https://graph.facebook.com/v21.0/${phoneId}/media`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          results.push({
+            ok: false,
+            errorCode: "MEDIA_ERROR",
+            error: `WhatsApp media upload failed (HTTP ${res.status}): ${errText.slice(0, 160)}`,
+          });
+          continue;
+        }
+
+        const json = (await res.json()) as { id?: string };
+        if (json.id) {
+          results.push({ ok: true, platformMediaId: json.id });
+        } else {
+          results.push({ ok: false, errorCode: "MEDIA_ERROR", error: "Missing media ID in response." });
+        }
+      } catch (err: unknown) {
+        results.push({
+          ok: false,
+          errorCode: "MEDIA_ERROR",
+          error: `Media upload exception: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
+    return results;
   }
 
   async publishPost(account: PlatformAccountRecord, input: PublishInput): Promise<PublishResult> {
@@ -794,7 +1179,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
         ok: false,
         mode: "real",
         errorCode: "AUTH_ERROR",
-        error: "WhatsApp API credentials not found. Configure Phone Number ID and Access Token to dispatch announcements.",
+        error: "WhatsApp API credentials not found. Configure Phone Number ID and Access Token in Settings.",
       };
     }
 
@@ -810,17 +1195,67 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
 
     try {
       // Recipient for business messaging (configured destination channel or test recipient)
-      const recipient = process.env.WHATSAPP_TEST_RECIPIENT || "me";
+      const recipient = process.env.WHATSAPP_RECIPIENT || process.env.WHATSAPP_TEST_RECIPIENT || "me";
 
-      const payload = {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: recipient,
-        type: "text",
-        text: { body: input.text },
-      };
+      let payload: Record<string, unknown>;
 
-      const res = await fetch(`https://graph.facebook.com/v20.0/${phoneId}/messages`, {
+      if (input.mediaPaths.length > 0) {
+        // Upload media to get WhatsApp media ID
+        const uploadInputs = input.mediaPaths.map((p) => {
+          const ext = p.split(".").pop()?.toLowerCase();
+          const mime = ext === "mp4" || ext === "mov" ? "video/mp4" : "image/jpeg";
+          return { localPath: p, mimeType: mime };
+        });
+
+        const uploads = await this.uploadMedia(account, uploadInputs);
+        const failed = uploads.find((u) => !u.ok);
+        if (failed) {
+          return {
+            ok: false,
+            mode: "real",
+            errorCode: failed.errorCode || "MEDIA_ERROR",
+            error: failed.error || "WhatsApp media upload failed.",
+          };
+        }
+
+        const mediaId = uploads[0].platformMediaId;
+        const isVideo = input.mediaPaths[0].toLowerCase().endsWith(".mp4");
+
+        payload = {
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: recipient,
+          type: isVideo ? "video" : "image",
+          [isVideo ? "video" : "image"]: {
+            id: mediaId,
+            caption: input.text,
+          },
+        };
+      } else if (input.text.startsWith("TEMPLATE:")) {
+        // Template message parsing
+        const templateName = input.text.replace("TEMPLATE:", "").trim().split(/\s+/)[0];
+        payload = {
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: recipient,
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: "en_US" },
+          },
+        };
+      } else {
+        // Standard Text Message
+        payload = {
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: recipient,
+          type: "text",
+          text: { body: input.text },
+        };
+      }
+
+      const res = await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -850,7 +1285,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
             ok: false,
             mode: "real",
             errorCode: "AUTH_ERROR",
-            error: "WhatsApp Cloud API token is expired or unauthorized.",
+            error: "WhatsApp Cloud API token is expired or unauthorized. Reconnect your account.",
           };
         }
 
@@ -872,7 +1307,10 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
       }
 
       const messages = data.messages as Array<Record<string, unknown>> | undefined;
-      const messageId = messages && messages[0] && typeof messages[0].id === "string" ? messages[0].id : `wa-${Date.now()}`;
+      const messageId =
+        messages && messages[0] && typeof messages[0].id === "string"
+          ? messages[0].id
+          : `wamid.${Date.now()}`;
 
       return {
         ok: true,
@@ -880,7 +1318,7 @@ export class WhatsAppPlatformAdapter implements PlatformAdapter {
         externalPostId: messageId,
         responseMeta: { status: "Sent", messageId, recipient },
       };
-    } catch (err) {
+    } catch (err: unknown) {
       return {
         ok: false,
         mode: "real",

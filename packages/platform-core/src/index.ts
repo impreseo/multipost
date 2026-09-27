@@ -7,12 +7,14 @@ import {
   WhatsAppPlatformAdapter,
 } from "./adapters.js";
 import type { CredentialResolver, PlatformAdapter } from "./types.js";
+import type { MediaHostConfig } from "./media-host.js";
 
 export class PlatformRegistry {
   constructor(
     private readonly devSimulation: boolean,
-    private readonly credentialResolver?: CredentialResolver
-  ) { }
+    private readonly credentialResolver?: CredentialResolver,
+    private readonly mediaHostConfig?: MediaHostConfig
+  ) {}
 
   getAdapter(platform: Platform): PlatformAdapter {
     if (this.devSimulation) {
@@ -22,7 +24,7 @@ export class PlatformRegistry {
       case "linkedin":
         return new LinkedInPlatformAdapter(this.credentialResolver);
       case "instagram":
-        return new InstagramPlatformAdapter(this.credentialResolver);
+        return new InstagramPlatformAdapter(this.credentialResolver, this.mediaHostConfig);
       case "whatsapp":
         return new WhatsAppPlatformAdapter(this.credentialResolver);
       default:
@@ -37,3 +39,4 @@ export class PlatformRegistry {
 export * from "./types.js";
 export * from "./adapters.js";
 export * from "./webhook.js";
+export * from "./media-host.js";

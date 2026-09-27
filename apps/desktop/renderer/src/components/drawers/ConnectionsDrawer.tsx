@@ -23,6 +23,8 @@ export function ConnectionsDrawer({ onClose, onChanged }: Props) {
   const [statuses, setStatuses] = useState<Record<string, PlatformStatusInfo>>({});
   const [testingId, setTestingId] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [verifyModalAccount, setVerifyModalAccount] = useState<PlatformAccountRecord | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [oauthConfig, setOauthConfig] = useState<{
     linkedin: { configured: boolean };
     instagram: { configured: boolean };
@@ -112,6 +114,30 @@ export function ConnectionsDrawer({ onClose, onChanged }: Props) {
       onChanged();
     } catch (err: unknown) {
       pushToast(err instanceof Error ? err.message : "Disconnect failed", "error");
+    }
+  }
+
+  async function handleVerifyLive(account: PlatformAccountRecord) {
+    setIsVerifying(true);
+    try {
+      const res = await getWelz().platforms.verifyLive({
+        accountId: account.id,
+        content: `WELZ live integration verification (${new Date().toLocaleTimeString()}).`,
+      });
+
+      if (res.ok && res.externalPostId) {
+        pushToast(`LIVE VERIFIED ✓ Remote ID: ${res.externalPostId}`, "default");
+        await loadData();
+        onChanged();
+        setVerifyModalAccount(null);
+      } else {
+        const errorMsg = res.error || "Live verification failed.";
+        pushToast(`LIVE VERIFICATION FAILED: ${errorMsg}`, "error");
+      }
+    } catch (err: unknown) {
+      pushToast(`Verification failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    } finally {
+      setIsVerifying(false);
     }
   }
 
@@ -261,8 +287,24 @@ export function ConnectionsDrawer({ onClose, onChanged }: Props) {
                         onClick={() => handleTest(acc.id)}
                         title="Test API connectivity & token credentials"
                       >
-                        {isTesting ? "Testing..." : "Test Connection"}
+                        {isTesting ? "Testing..." : "Test"}
                       </button>
+
+                      {isConnected && (
+                        <button
+                          type="button"
+                          className="btn-tiny"
+                          style={{
+                            background: "rgba(56, 189, 248, 0.12)",
+                            color: "#38bdf8",
+                            borderColor: "rgba(56, 189, 248, 0.3)",
+                          }}
+                          onClick={() => setVerifyModalAccount(acc)}
+                          title="Publish a real live verification post to confirm provider integration"
+                        >
+                          Verify Live
+                        </button>
+                      )}
 
                       {isConnected ? (
                         <button
@@ -302,6 +344,78 @@ export function ConnectionsDrawer({ onClose, onChanged }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Explicit Live Verification Confirmation Modal */}
+      {verifyModalAccount && (
+        <div className="modal-backdrop" onClick={() => !isVerifying && setVerifyModalAccount(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Live API Verification</h3>
+              <button
+                type="button"
+                className="drawer-close-btn"
+                disabled={isVerifying}
+                onClick={() => setVerifyModalAccount(null)}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p style={{ fontSize: 13, color: "var(--text-primary)", margin: "14px 0 8px 0" }}>
+              This will create an actual live post or message on your connected account:
+            </p>
+
+            <div
+              style={{
+                padding: "10px 14px",
+                background: "var(--bg-app)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--radius-sm)",
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: 13 }}>
+                {PLATFORM_LABELS[verifyModalAccount.platform]} — {verifyModalAccount.accountName}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                Content: "WELZ live integration verification ({new Date().toLocaleTimeString()})."
+              </div>
+            </div>
+
+            <div
+              style={{
+                fontSize: 11,
+                color: "#f59e0b",
+                background: "rgba(245, 158, 11, 0.1)",
+                padding: "8px 10px",
+                borderRadius: 4,
+                marginBottom: 16,
+              }}
+            >
+              ⚠ A genuine API call will be executed against the official provider endpoint. Real post ID and remote confirmation will be captured.
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="btn-quiet"
+                disabled={isVerifying}
+                onClick={() => setVerifyModalAccount(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-publish-cta"
+                disabled={isVerifying}
+                onClick={() => void handleVerifyLive(verifyModalAccount)}
+              >
+                {isVerifying ? "Publishing Real Test..." : "Publish Real Test →"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

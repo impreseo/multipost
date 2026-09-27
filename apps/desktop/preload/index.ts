@@ -111,6 +111,14 @@ export interface WelzApi {
       account: PlatformAccountRecord | null;
     }>;
     disconnect: (accountId: string) => Promise<PlatformAccountRecord | null>;
+    verifyLive: (payload: { accountId: string; content?: string }) => Promise<{
+      ok: boolean;
+      mode: string;
+      externalPostId?: string;
+      errorCode?: string;
+      error?: string;
+      responseMeta?: Record<string, unknown>;
+    }>;
   };
   oauth: {
     status: () => Promise<{
@@ -218,6 +226,7 @@ const api: WelzApi = {
     test: (accountId) => ipcRenderer.invoke("platforms:test", accountId),
     connect: (accountId) => ipcRenderer.invoke("platforms:connect", accountId),
     disconnect: (accountId) => ipcRenderer.invoke("platforms:disconnect", accountId),
+    verifyLive: (payload) => ipcRenderer.invoke("platforms:verifyLive", payload),
   },
   oauth: {
     status: () => ipcRenderer.invoke("oauth:status"),

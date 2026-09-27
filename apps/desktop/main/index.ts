@@ -45,6 +45,13 @@ function isDevSimulation(): boolean {
   return repo?.getSetting("dev_mode") === "true";
 }
 
+function getMediaHostConfig() {
+  const provider = repo?.getSetting("cfg_media_host_provider") as "imgbb" | "custom" | "s3" | undefined;
+  const apiKey = getSecret("cfg_media_host_key") ?? undefined;
+  const uploadEndpoint = repo?.getSetting("cfg_media_host_endpoint");
+  return { provider, apiKey, uploadEndpoint };
+}
+
 function broadcast(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
@@ -63,10 +70,13 @@ function initServices(): void {
   if (repo.getSetting("onboarding_complete") !== "true") {
     repo.setSetting("onboarding_complete", "false");
   }
+  if (!repo.getSetting("dev_mode")) {
+    repo.setSetting("dev_mode", "false");
+  }
   if (!repo.getSetting("timezone")) {
     repo.setSetting("timezone", "Asia/Kolkata");
   }
-  const registry = new PlatformRegistry(isDevSimulation(), (ref) => getSecret(ref));
+  const registry = new PlatformRegistry(isDevSimulation(), (ref) => getSecret(ref), getMediaHostConfig());
   engine = new AutomationEngine(repo, registry, (event) => {
     if (event.type === "state") {
       broadcast("automation:state", event.data);
@@ -375,6 +385,35 @@ function registerIpc(): void {
     repository.updatePlatformAccountStatus(accountId, "disconnected", null);
     return repository.getPlatformAccount(accountId);
   });
+
+  ipcMain.handle(
+    "platforms:verifyLive",
+    async (_e, { accountId, content }: { accountId: string; content?: string }) => {
+      const { repo: repository } = r();
+      const account = repository.getPlatformAccount(accountId);
+      if (!account) throw new Error("Account not found");
+
+      // LIVE ONLY: Always route through real provider adapter
+      const registry = new PlatformRegistry(false, (ref) => getSecret(ref), getMediaHostConfig());
+      const adapter = registry.getAdapter(account.platform);
+
+      const testContent = content?.trim() || `WELZ live integration verification (${new Date().toLocaleTimeString()}).`;
+      const idempotencyKey = `live-verify-${accountId}-${Date.now()}`;
+
+      const result = await adapter.publishPost(account, {
+        account,
+        text: testContent,
+        mediaPaths: [],
+        idempotencyKey,
+      });
+
+      if (result.ok && result.externalPostId) {
+        repository.updatePlatformAccountStatus(accountId, "connected");
+      }
+
+      return result;
+    }
+  );
 
   ipcMain.handle("oauth:status", () => {
     return (
