@@ -1,0 +1,51 @@
+:root {
+  color-scheme: dark;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", "Consolas", monospace;
+
+  /* Coherent Multi-Layer Color System */
+  --bg-app: #080a0d;
+  --bg-workspace: #0c1014;
+  --bg-document: #14191f;
+  --bg-editor: #14191f;
+  --bg-document-elevated: #171d24;
+  --bg-surface: #0c1014;
+  --bg-elevated: #161b21;
+  --bg-bottom-action: #161b21;
+  --bg-hover: rgba(255, 255, 255, 0.04);
+  --bg-active: rgba(255, 255, 255, 0.08);
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.10);
+
+  --text-primary: #f4f6f8;
+  --text-secondary: #a4adba;
+  --text-muted: #687381;
+
+  /* Restrained WELZ Accent */
+  --primary: #38bdf8;
+  --primary-hover: #60a5fa;
+  --primary-muted: rgba(56, 189, 248, 0.08);
+
+  /* Semantic Feedback */
+  --success: #22c55e;
+  --success-muted: rgba(34, 197, 94, 0.1);
+  --warning: #f59e0b;
+  --warning-muted: rgba(245, 158, 11, 0.12);
+  --error: #ef4444;
+  --error-muted: rgba(239, 68, 68, 0.1);
+
+  /* Radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 36px rgba(0, 0, 0, 0.5);
+
+  --topbar-height: 48px;
+  --bottombar-height: 52px;
+}

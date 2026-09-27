@@ -1,0 +1,20 @@
+{
+  "name": "welz-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first content operations and publishing automation",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @welz/desktop",
+    "build": "npm run build -w @welz/shared && npm run build -w @welz/database && npm run build -w @welz/platform-core && npm run build -w @welz/automation && npm run build -w @welz/scheduler && npm run build -w @welz/desktop",
+    "typecheck": "npm run typecheck -w @welz/shared && npm run typecheck -w @welz/database && npm run typecheck -w @welz/platform-core && npm run typecheck -w @welz/automation && npm run typecheck -w @welz/scheduler && npm run typecheck -w @welz/desktop",
+    "test": "npm run test -w @welz/database && npm run test -w @welz/platform-core",
+    "postinstall": "npm run build -w @welz/shared && npm run build -w @welz/database && npm run build -w @welz/platform-core && npm run build -w @welz/automation && npm run build -w @welz/scheduler"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
